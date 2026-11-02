@@ -1,0 +1,37 @@
+{
+  "记录历史": true,
+  "历史保留天数": 90,
+  "转录目录": "",
+  "开机自启": false,
+  "口语清理": false,
+  "已提示赞助": false,
+  "cooldownMs": 300000,
+  "热键": {
+    "模式": "single",
+    "短输入": "Control+Shift+Space",
+    "长录音": "Control+Shift+L"
+  },
+  "providers": [
+    { "id": "dashscope", "enabled": true },
+    { "id": "groq", "enabled": true },
+    { "id": "openai", "enabled": true },
+    { "id": "custom", "enabled": true, "baseUrl": "", "model": "" },
+    {
+      "id": "whispercpp",
+      "enabled": true,
+      "mode": "exec",
+      "execPath": "",
+      "modelPath": "",
+      "serverUrl": ""
+    }
+  ],
+  "polish": {
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode",
+    "model": "qwen-flash"
+  },
+  "watch": {
+    "enabled": false,
+    "dir": "",
+    "intervalSec": 5
+  }
+}

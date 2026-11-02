@@ -1,0 +1,88 @@
+{
+  "name": "voice-input-cn",
+  "productName": "VoiceInput",
+  "version": "0.1.0",
+  "description": "按一个键说话，说完文字直接落在光标处。跨平台（macOS / Windows）语音输入法。",
+  "license": "MIT",
+  "private": true,
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/**/*.test.js\"",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.lihaochuang.voiceinput",
+    "productName": "VoiceInput",
+    "artifactName": "VoiceInput-${version}-${os}-${arch}.${ext}",
+    "afterPack": "./afterPack.js",
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/uiohook-napi/**"
+    ],
+    "compression": "maximum",
+    "npmRebuild": false,
+    "removePackageScripts": true,
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "files": [
+      "src/**",
+      "node_modules/uiohook-napi/**",
+      "node_modules/node-gyp-build/**",
+      "assets/icon.icns",
+      "assets/icon.ico",
+      "assets/icon.png",
+      "assets/tray/**",
+      "assets/sponsor-wechat.jpg",
+      "热词.示例.txt",
+      "纠错表.示例.txt",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "identity": null,
+      "extendInfo": {
+        "LSUIElement": true,
+        "CFBundleDisplayName": "语音输入",
+        "NSMicrophoneUsageDescription": "语音输入需要麦克风来录制你说的话并转成文字。",
+        "NSAppleEventsUsageDescription": "语音输入需要发送按键事件，才能把识别出的文字粘贴到当前输入框。"
+      }
+    },
+    "dmg": {
+      "sign": false,
+      "title": "语音输入 ${version}"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "语音输入"
+    }
+  },
+  "optionalDependencies": {
+    "uiohook-napi": "^1.5.5"
+  },
+  "devDependencies": {
+    "electron": "44.10.1",
+    "electron-builder": "26.18.1"
+  }
+}

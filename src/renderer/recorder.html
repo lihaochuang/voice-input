@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP 必须显式带上 media-src 与 worker-src。
+      只写 `default-src 'none'; script-src 'self'` 的话，AudioWorklet 的模块与
+      麦克风流都会被挡住，而且**不抛任何异常**：graph 建得「成功」、track 是
+      live 的，但 process() 不被回调、MediaStreamDestination 不出样本，表现为
+      PCM 0 块 + opus 只剩 110 字节的容器头。和 sink 漏接、context 不 running
+      是同一个症状的第三个原因。实测踩过。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; worker-src 'self' blob:; media-src 'self' blob: mediastream:"
+    />
+    <title>recorder</title>
+  </head>
+  <body>
+    <!-- 隐藏窗口，只做音频采集，没有界面。 -->
+    <script src="recorder.js"></script>
+  </body>
+</html>
