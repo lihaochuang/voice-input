@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 赞助页的收款码走 data: URL（main 读成 base64 再经 IPC 给过来，§25.2），
+     所以 img-src 必须放行 data:。其余一律 'none'：这个窗口不联网。 -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; form-action 'none'">
+<title>语音输入 · 设置</title>
+<link rel="stylesheet" href="settings.css">
+</head>
+<body>
+
+<header id="statusbar">
+  <span id="st-state" class="pill">待机</span>
+  <span id="st-provider" class="muted">后端：—</span>
+  <span id="st-pending" class="muted"></span>
+  <span id="st-watch" class="muted"></span>
+  <span id="st-saved" class="saved"></span>
+</header>
+
+<!-- 补转队列里被跳过的条目。音频保住了，但不说一声就等于还是丢了（评审 M2）。 -->
+<div id="stuck-note" class="stuck-note" hidden></div>
+
+<nav id="tabs">
+  <button class="tab" data-tab="backends">后端与密钥</button>
+  <button class="tab" data-tab="hotwords">热词</button>
+  <button class="tab" data-tab="hotkeys">热键</button>
+  <button class="tab" data-tab="behavior">行为与历史</button>
+  <button class="tab" data-tab="import">导入</button>
+  <button class="tab" data-tab="sponsor">赞助</button>
+</nav>
+
+<main>
+
+<!-- ───────────────────────── 后端与密钥 ───────────────────────── -->
+<section class="panel" data-panel="backends">
+  <div id="guide" class="guide" hidden>
+    <h2>先配一个后端，就能用了</h2>
+    <ol>
+      <li><b>去哪拿 Key</b>：用<b>阿里云百炼</b>就行，中文识别最准，<b>有免费额度</b>——
+        <a href="https://bailian.console.aliyun.com/" class="ext">打开百炼控制台</a>创建一个 API-KEY，
+        复制过来粘到下面那个输入框，<b>不用管它是哪家，会自动识别</b>。
+        （也支持 Groq / OpenAI / 任何 OpenAI 兼容端点，粘进来同样能认出来；想手动配在「高级设置」里。）</li>
+      <li><b>不填 Key 也能用</b>：本地 whisper.cpp 是离线兜底，<b>完全不需要 Key</b>。
+        它要你先自己装好 whisper.cpp，再到「高级设置」里指到可执行文件和模型文件。
+        只有用云端模型才需要配 Key。</li>
+      <li><b>Key 只存在这台电脑上</b>，用系统的加密存储（macOS 钥匙串 / Windows DPAPI）加密后写在本机，
+        不进配置文件、不进日志、不上传。换电脑要重新填。</li>
+      <li><b>需要的系统权限</b>：麦克风是必须的；macOS 还需要「辅助功能」（单键热键与模拟粘贴）
+        和「自动化」（模拟粘贴时给系统事件发按键）。
+        <span class="mac-only">
+          <a href="x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" class="ext">打开辅助功能面板</a>
+          ·
+          <a href="x-apple.systempreferences:com.apple.preference.security?Privacy_Automation" class="ext">打开自动化面板</a>
+        </span></li>
+      <li>存完点「<b>测试连接</b>」，当场就知道配好没配好，不用等第一次说话失败才发现。</li>
+    </ol>
+    <button id="guide-dismiss" class="link">我知道了，收起这段</button>
+  </div>
+
+  <h2>填一个 API Key 就能用</h2>
+  <p class="hint">
+    推荐<b>阿里云百炼</b>（中文识别最准，<b>有免费额度</b>）——
+    <a href="https://bailian.console.aliyun.com/" class="ext">打开百炼控制台创建 API-KEY</a>，
+    复制过来粘在下面。
+  </p>
+  <div class="field">
+    <label for="key-one">API Key</label>
+    <input id="key-one" type="password" spellcheck="false" autocomplete="off" placeholder="粘贴你的 API Key，自动识别是哪家">
+    <button id="key-detect" class="primary">检测并保存</button>
+  </div>
+  <p id="key-detect-out" class="detect-out"></p>
+  <p class="hint">
+    不用自己选是哪家：粘进来之后会拿它去问各家的接口，谁认它就归谁。
+    Key 只存在这台电脑上（系统加密存储），不进配置文件、不进日志、不上传。
+  </p>
+
+  <h2>当前可用的后端</h2>
+  <div id="prov-strip"></div>
+  <p class="row">
+    <button id="reset-cooldowns">重置后端状态</button>
+    <span class="hint">清掉所有「冷却中」，让刚修好的后端立刻能用。</span>
+  </p>
+  <p class="info">
+    💡 <b>不填 Key 也能用</b>：本地 whisper.cpp 是离线兜底，完全不需要任何 Key。
+    它要你先自己装好 whisper.cpp，然后在下面的「高级设置」里指到可执行文件和模型文件。
+    只有用云端模型（百炼 / Groq / OpenAI）才需要配 Key。
+  </p>
+
+  <details id="advanced">
+  <summary>高级设置（多后端优先级、自定义端点、本地 whisper.cpp、口语清理端点）</summary>
+
+  <h2>后端优先级</h2>
+  <p class="hint">
+    按从上到下的顺序依次尝试，上一个失败才会用下一个。拖动左边的柄可以调顺序。
+    每一行都能单独填 Key、改参数、测连接。
+  </p>
+  <div id="provider-list"></div>
+
+  <h2>口语清理的端点（可选，和上面的识别后端分开）</h2>
+  <p class="hint">
+    只有「行为与历史」页把<b>口语清理</b>打开后才会用到它。留空就复用百炼的 Key 走它的兼容端点。
+  </p>
+  <div class="field">
+    <label for="polish-base">清理端点</label>
+    <input id="polish-base" type="text" spellcheck="false" placeholder="https://dashscope.aliyuncs.com/compatible-mode">
+    <p class="hint">必须是 <code>https://</code>。只有本机回环（<code>127.0.0.1</code> / <code>localhost</code>）允许 <code>http://</code>。
+      多填的 <code>/v1</code>、<code>/chat/completions</code> 保存时会自动剥掉。</p>
+  </div>
+  <div class="field">
+    <label for="polish-key">清理 Key</label>
+    <input id="polish-key" type="password" spellcheck="false" autocomplete="off" placeholder="留空则复用百炼的 Key">
+    <button id="polish-key-save">保存</button>
+    <span id="polish-key-state" class="muted"></span>
+  </div>
+  <div class="field">
+    <label for="polish-model">清理模型</label>
+    <input id="polish-model" type="text" spellcheck="false" placeholder="qwen-flash">
+  </div>
+  <p class="row"><button id="polish-save" class="primary">保存清理端点设置</button><span id="polish-msg" class="muted"></span></p>
+  </details>
+</section>
+
+<!-- ───────────────────────── 热词 ───────────────────────── -->
+<section class="panel" data-panel="hotwords">
+  <p class="warn">
+    ⚠ 热词表会随<b>每一次</b>识别请求发给你配置的 ASR 服务。
+    不要往里写密码、密钥、金额、身份证号。
+  </p>
+  <h2>热词表</h2>
+  <p class="hint">
+    直接编辑 <code>热词.txt</code> 原文，<code>#</code> 开头的是注释（可以用来按主题分组）。
+    <b>保存即生效，不需要重启</b>——每次识别都会重新读这个文件。
+  </p>
+  <textarea id="hotwords-text" spellcheck="false"></textarea>
+  <p class="row">
+    <button id="hotwords-save" class="primary">保存热词</button>
+    <span id="hotwords-count" class="muted"></span>
+    <span id="hotwords-msg" class="muted"></span>
+  </p>
+
+  <h2>自动提炼热词</h2>
+  <label class="check"><input id="ah-enabled" type="checkbox"> 定期自动把高频词加进热词表
+    <span class="hint">关掉就回到下面那种「挖出来给我看，我自己勾」的手动模式。</span></label>
+  <div class="field">
+    <label for="ah-freq">频率</label>
+    <select id="ah-freq">
+      <option value="weekly">每周</option>
+      <option value="monthly">每月</option>
+      <option value="off">关闭</option>
+    </select>
+    <label for="ah-min">出现次数 ≥</label>
+    <input id="ah-min" type="number" min="2" max="100" step="1">
+    <button id="ah-save">保存</button>
+    <button id="ah-run">立刻提炼一次</button>
+    <span id="ah-msg" class="muted"></span>
+  </div>
+  <div class="warn">
+    <p>⚠ <b>自动加词有个真实的风险，这里说清楚：</b>
+      ASR 听错的词也会高频出现。实测过的例子——说「客单价」被反复听成「课单价」，
+      「课单价」于是成了高频词。<b>把它自动加进热词表，模型会更倾向于输出那个错词，错误自我强化</b>，
+      而且你很难想到是自己的热词表在推着它错。</p>
+    <p>所以这里做了几道对冲：门槛比手动模式高（默认说过 5 次才收）；
+      自动加的词单独放一段、可以整段回滚；下面的列表能逐个移除；
+      移除时默认同时加入「永不自动添加」，不会下次又被加回来。
+      <b>请隔段时间扫一眼下面的列表，看见听错的词就删掉。</b></p>
+  </div>
+  <h2>自动添加的热词</h2>
+  <p class="row">
+    <span id="ah-count" class="muted"></span>
+    <button id="ah-clear">全部移除</button>
+  </p>
+  <div id="ah-list"></div>
+  <p class="row"><span id="ah-black-label" class="muted"></span></p>
+  <div id="ah-black"></div>
+
+  <h2>手动挖词</h2>
+  <p class="hint">从本机识别历史里统计高频词，你自己挑哪些值得进表。</p>
+  <p class="row"><button id="mine-run">挖掘候选</button><span id="mine-msg" class="muted"></span></p>
+  <div id="mine-box" hidden>
+    <p class="warn">
+      ⚠ <b>识别错的词也会高频出现。</b>
+      比如你说「留存率」老被听成「留存绿」，「留存绿」就会出现在下面。
+      把它加进热词表会让这个错误<b>固化</b>——模型会更倾向于输出错词。务必逐个看过再勾。
+    </p>
+    <div id="mine-list"></div>
+    <p class="row">
+      <button id="mine-merge" class="primary">并入热词表</button>
+      <span class="hint">候选同时写进了 <code>待确认热词.txt</code>，也可以直接改那个文件。</span>
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────── 热键 ───────────────────────── -->
+<section class="panel" data-panel="hotkeys">
+  <p id="hk-mode-line" class="info"></p>
+  <h2>触发方式</h2>
+  <div class="field">
+    <label>模式</label>
+    <label class="radio"><input type="radio" name="hk-mode" value="single"> 单键（按一下开始，再按一下结束）</label>
+    <label class="radio"><input type="radio" name="hk-mode" value="combo"> 组合键</label>
+  </div>
+  <p class="hint">
+    单键靠全局键盘钩子实现，macOS 需要「辅助功能」权限。
+    钩子加载失败、没权限、或上次崩在钩子里，都会自动降级成组合键——降级原因显示在最上面那行。
+  </p>
+
+  <h2>组合键</h2>
+  <p class="hint">点一下输入框然后按下你要的组合键。至少一个修饰键（⌃⌘⌥⇧）加恰好一个主键。</p>
+  <div class="field">
+    <label for="hk-short">短输入</label>
+    <input id="hk-short" class="accel" type="text" readonly placeholder="点这里按下组合键">
+    <span id="hk-short-msg" class="muted"></span>
+  </div>
+  <div class="field">
+    <label for="hk-long">长录音</label>
+    <input id="hk-long" class="accel" type="text" readonly placeholder="点这里按下组合键">
+    <span id="hk-long-msg" class="muted"></span>
+  </div>
+</section>
+
+<!-- ───────────────────────── 行为与历史 ───────────────────────── -->
+<section class="panel" data-panel="behavior">
+  <h2>行为</h2>
+  <label class="check"><input id="b-history" type="checkbox"> 记录历史
+    <span class="hint">每次识别的原文存在本机，用于挖热词和回查。关掉后完全不落盘。</span></label>
+  <div class="field">
+    <label for="b-keepdays">历史保留天数</label>
+    <input id="b-keepdays" type="number" min="0" max="3650" step="1">
+    <span class="hint">按月文件整体删除。填 0 表示不清理。</span>
+  </div>
+  <div class="field">
+    <label for="b-dir">转录目录</label>
+    <input id="b-dir" type="text" spellcheck="false">
+    <button id="b-dir-pick">选择文件夹</button>
+    <button id="b-dir-open">打开文件夹</button>
+  </div>
+  <label class="check"><input id="b-autostart" type="checkbox"> 开机自启</label>
+
+  <h2>口语清理</h2>
+  <label class="check"><input id="b-polish" type="checkbox"> 打开口语清理</label>
+  <div class="warn polish-warn">
+    <p><b>默认关闭。</b>打开后会用大模型删掉「嗯 / 啊 / 那个 / 就是」这类口头禅。</p>
+    <p><b>实测它会删掉有信息的内容。</b>已经加了「结果必须是原文子序列」的硬校验
+      （保证它不会编造新字），<b>仍然挡不住它删掉重要的词</b>。</p>
+    <p><b>会议、面试、复盘这类录音不要开</b>——犹豫和重复本身就是材料。</p>
+  </div>
+  <p class="hint">只对「短输入」生效。长录音和失败补转一律跳过，不看这个开关。</p>
+
+  <p class="row">
+    <button id="b-save" class="primary">保存</button>
+    <span id="b-msg" class="muted"></span>
+    <button id="b-open-data" class="link">打开数据文件夹</button>
+  </p>
+
+  <h2>历史</h2>
+  <p class="hint">最近 200 条，新的在前。文本可以直接选中复制。</p>
+  <div id="history-list"></div>
+</section>
+
+<!-- ───────────────────────── 导入 ───────────────────────── -->
+<section class="panel" data-panel="import" id="drop-zone">
+  <h2>导入已有音频</h2>
+  <p class="hint">
+    支持 <span id="imp-exts"></span>。可以点下面的按钮选，也可以<b>直接把文件拖到这个窗口里</b>。
+    队列是串行的，一次转一个文件；正在录音时会先暂停，录完自动继续。
+  </p>
+  <p class="row"><button id="imp-pick" class="primary">选择音频文件…</button><span id="imp-msg" class="muted"></span></p>
+  <div id="imp-queue"></div>
+
+  <h2>文件夹监听</h2>
+  <label class="check"><input id="w-enabled" type="checkbox"> 启用文件夹监听
+    <span class="hint">往这个文件夹里丢音频，自动转写。</span></label>
+  <div class="field">
+    <label for="w-dir">监听目录</label>
+    <input id="w-dir" type="text" spellcheck="false">
+    <button id="w-dir-pick">选择文件夹</button>
+  </div>
+  <div class="field">
+    <label for="w-interval">轮询间隔</label>
+    <input id="w-interval" type="number" min="2" max="300" step="1"> 秒
+    <span class="hint">用轮询而不是文件系统事件：网络盘和 SD 卡上后者会漏报，而且会在文件写到一半时就报。</span>
+  </div>
+  <p class="row"><button id="w-save" class="primary">保存监听设置</button><span id="w-msg" class="muted"></span></p>
+  <p class="hint footnote">
+    转完的文件会挪进监听目录下的 <code>已完成/</code>，<b>原文件保留</b>；
+    <b>手动导入的文件不会被移动</b>。监听目录不能等于或包含转录目录（否则自己的产物会被当成新输入，循环下去）。
+  </p>
+</section>
+
+<!-- ───────────────────────── 赞助 ───────────────────────── -->
+<section class="panel" data-panel="sponsor">
+  <h2>赞助作者</h2>
+  <p id="sp-text" class="hint"></p>
+  <img id="sp-img" alt="收款码" hidden>
+  <p><a id="sp-repo" class="ext" href="#" hidden>在 GitHub 上看这个项目</a></p>
+  <label class="check"><input id="sp-never" type="checkbox"> 不再提示
+    <span class="hint">第一次成功识别之后会提一次，仅此一次。勾上这里可以提前关掉。</span></label>
+</section>
+
+</main>
+<script src="settings.js"></script>
+</body>
+</html>

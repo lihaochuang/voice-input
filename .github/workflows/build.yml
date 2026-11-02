@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 必须是 24：node --test 的行为在 Node ≥22 与 20 上不同，开发机是 24，
+          # CI 用别的大版本会让 npm test 两边行为不一致。
+          node-version: '24'
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Test
+        run: npm test
+      # 收款码不进仓库：有 secret 时解码写入 assets/，没有（fork / PR）则静默跳过、
+      # 构建照常成功，打出来的就是不含收款码的版本（应用内有缺图降级文案）。
+      - name: Inject sponsor QR (optional)
+        run: node -e "const b=process.env.SPONSOR_QR_B64; if(b){require('fs').mkdirSync('assets',{recursive:true}); require('fs').writeFileSync('assets/sponsor-wechat.jpg', Buffer.from(b,'base64'))}"
+        env:
+          SPONSOR_QR_B64: ${{ secrets.SPONSOR_QR_B64 }}
+      - name: Build
+        run: npm run dist -- --publish never
+      # 这一步不是可选的：单键热键失效是唯一「错了不报错」的失效模式——
+      # require 抛错会被 try/catch 吃掉，静默降级到组合键，所有正式包都没有单键手感。
+      # 同时覆盖三种失效：.node 缺失 / asarUnpack 被删 / node-gyp-build 没进包。
+      - name: Assert native hook packed
+        shell: bash
+        run: |
+          set -e
+          node_file=$(find dist -path '*app.asar.unpacked/node_modules/uiohook-napi*' -name '*.node' | head -1)
+          test -n "$node_file" || { echo "FAIL: uiohook-napi 的 .node 不在 app.asar.unpacked 里（files 白名单漏带，或 asarUnpack 被删）"; exit 1; }
+          echo "ok .node: $node_file"
+          # node-gyp-build 是 uiohook-napi/dist/index.js:6 直接 require 的，缺它则 require 抛错。
+          # 它不需要 unpack（纯 JS），所以 asar 内或 asar.unpacked 内有任意一处即算通过。
+          gyp_dir=$(find dist -type d -path '*app.asar.unpacked/node_modules/node-gyp-build' | head -1)
+          if [ -z "$gyp_dir" ]; then
+            asar=$(find dist -name 'app.asar' | head -1)
+            test -n "$asar" || { echo "FAIL: 找不到 app.asar"; exit 1; }
+            # 用 @electron/asar 读目录表（electron-builder 的依赖，npm ci 之后就在）。
+            # 不用 grep 扫 asar 字节：uiohook-napi 的源码里本来就有 require('node-gyp-build')
+            # 这个字符串，grep 会假阳性，正好把要查的失效模式放过去。
+            # 先单独确认模块能解析：否则「工具坏了」会被下一行报成「node-gyp-build 没进包」，
+            # 把人指到错的地方（这正是本步要防的那类误判）。
+            node -e "require.resolve('@electron/asar')" >/dev/null 2>&1 \
+              || { echo "FAIL(工具问题，不是打包问题): 解析不到 @electron/asar，读不了 asar 目录表"; exit 1; }
+            node -e "const l=require('@electron/asar').listPackage(process.argv[1]);if(!l.some(p=>p.replace(/\\\\/g,'/').startsWith('/node_modules/node-gyp-build')))process.exit(1)" "$asar" \
+              || { echo "FAIL: node-gyp-build 既不在 asar 内也不在 app.asar.unpacked 里（files 白名单漏带），uiohook-napi 会 require 失败并静默降级到组合键"; exit 1; }
+            echo "ok node-gyp-build: 在 $asar 内"
+          else
+            echo "ok node-gyp-build: $gyp_dir"
+          fi
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceinput-${{ matrix.os }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+          if-no-files-found: ignore
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.dmg
+            dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

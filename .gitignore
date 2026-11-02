@@ -1,0 +1,45 @@
+# 依赖与构建产物
+node_modules/
+dist/
+out/
+*.asar
+
+# 个人数据：绝对不进仓库（仓库里只留 *.示例.txt）
+热词.txt
+纠错表.txt
+配置.json
+待确认热词.txt
+_候选热词*.txt
+历史/
+转录/
+待处理/
+tmp/
+日志/
+*.jsonl
+
+# 密钥与凭据
+creds/
+*.enc
+polish-key.enc
+*.pem
+*.p12
+.env
+.env.*
+
+# 音频与日志
+*.wav
+*.webm
+*.opus
+*.log
+
+# 图标源文件之外的本地资产
+assets/*.psd
+
+# 赞助收款码：绝不进仓库，由 CI 从 secret 注入（§25）
+assets/sponsor-wechat.jpg
+
+# 内部决策记录：开发期的输入文档，不进公开仓库
+设计决策.md
+# 系统
+.DS_Store
+Thumbs.db
