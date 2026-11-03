@@ -328,7 +328,7 @@ test('retryOldest：失败留在队列（音频一个字节都不许删），并
   assert.strictEqual(pending.count(), 1);
 });
 
-test('retryOldest：peak<500 的空结果删、peak≥500 的空结果保留', async () => {
+test('retryOldest：peak 低于 SILENCE_PEAK 的空结果删、高于的空结果保留', async () => {
   fresh();
   makeSession('a', constant(1, 0));
   pending.stash('a', { durationSec: 1, peak: 0 });

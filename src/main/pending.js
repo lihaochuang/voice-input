@@ -230,13 +230,13 @@ const stuckList = (items) =>
 /** 八种结局。'crash-*' 两种由启动扫描用，其余由 pipeline 的 finally 用。 */
 const OUTCOMES = [
   'too-short', // < 0.3 秒丢弃
-  'silent', // 静音拦截命中（peak < 500）
+  'silent', // 静音拦截命中（wav.isSilent：peak + 短窗 RMS，不是单看 peak）
   'success', // 拿到非空文本
   'failed', // 识别失败（含全链失败）
   'echo', // 热词回显命中
   'empty', // 非静音但结果为空
   'crash-zero-header', // 崩溃残留 · wav 头长度为 0
-  'crash-residue', // 崩溃残留 · 头正常但 < 0.3s 或 peak < 500
+  'crash-residue', // 崩溃残留 · 头正常但 < 0.3s 或 wav.isSilent 判静音
 ];
 
 /** 头里 data 块的长度字段是不是 0（= 录音中崩溃，还没 patchHeader）。 */
