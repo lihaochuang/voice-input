@@ -41,6 +41,7 @@ const secret = require('./secret');
 const asr = require('./asr');
 const openaiCompat = require('./asr/openai-compat'); // isUrlAllowed：清理端点的 N5 校验
 const hotkeysMod = require('./hotkeys');
+const keycodes = require('./keycodes'); // 键名与三条冲突规则：renderer 拿不到它，判定只能在 main
 const pasteMod = require('./paste');
 const sessionMod = require('./session');
 const pending = require('./pending');
@@ -305,7 +306,11 @@ function openSettings(tab, extra = {}) {
   });
   settingsWin.loadFile(file, hash ? { hash } : undefined);
   settingsWin.webContents.on('did-finish-load', pushState); // 开窗就有状态条，不等下一次事件
-  settingsWin.on('closed', () => { settingsWin = null; }); // 不常驻，关闭即销毁
+  settingsWin.on('closed', () => {
+    settingsWin = null; // 不常驻，关闭即销毁
+    // 窗没了但录制态还挂着的话，下一次按键会被当成「录键位」吞掉，热键整体哑掉
+    if (hotkeys) hotkeys.cancelCapture();
+  });
   return settingsWin;
 }
 
@@ -703,6 +708,41 @@ function asrStatusList() {
   });
 }
 
+/** 当前生效的单键键位（配置缺键或非法时退平台默认），口径与 hotkeys.start 一致。 */
+function singleKeys() {
+  const d = keycodes.defaultsFor(process.platform);
+  const kk = (cfg && cfg.热键) || {};
+  return {
+    short: Number.isInteger(kk.单键短输入) ? kk.单键短输入 : d.short,
+    long: Number.isInteger(kk.单键长录音) ? kk.单键长录音 : d.long,
+  };
+}
+
+/**
+ * 录到一个键之后：判一下能不能用，再把结果回推给设置页。
+ * 这里是权威闸——renderer 是不可信输入源，界面上的提示只是给人看的。
+ */
+function onHotkeyCaptured(which, r) {
+  if (!settingsWin || settingsWin.isDestroyed()) return;
+  const send = (payload) => settingsWin.webContents.send(CHANNELS.HOTKEY_CAPTURED, { which, ...payload });
+  if (r && r.timeout) {
+    send({ keycode: null, label: '', verdict: 'timeout', message: '没收到按键，已取消录制' });
+    return;
+  }
+  const keycode = r && r.keycode;
+  const label = keycodes.labelOf(keycode, process.platform);
+  let { verdict, message } = keycodes.classify(keycode, process.platform);
+  // 规则 (b)：撞上另一个角色当前的键。classify 看不到这件事，它只认单个键码。
+  const other = which === 'short' ? singleKeys().long : singleKeys().short;
+  if (verdict !== 'blocked' && keycode === other) {
+    const pair = keycodes.checkPair(keycode, keycode);
+    verdict = 'blocked';
+    message = pair.message;
+  }
+  logger.info(MOD, `录到键位 ${which}=${keycode}（${label}）→ ${verdict}`);
+  send({ keycode, label, verdict, message });
+}
+
 function buildIpcDeps() {
   return {
     activeSessionId: () => session.activeSessionId,
@@ -727,7 +767,20 @@ function buildIpcDeps() {
       ...cfg,
       _encryptionOk: encryptionOk,
       _platform: process.platform,
-      _hotkeys: hotkeys ? { mode: hotkeys.mode, reason: hotkeys.reason, describe: hotkeys.describe() } : null,
+      // singleLabels / recommended 必须由 main 给：keycodes.js 在主进程，renderer
+      // 只拿得到数值键码，自己翻不出「右 Option」这种键名。
+      _hotkeys: hotkeys
+        ? {
+          mode: hotkeys.mode,
+          reason: hotkeys.reason,
+          describe: hotkeys.describe(),
+          singleLabels: {
+            short: keycodes.labelOf(singleKeys().short, process.platform),
+            long: keycodes.labelOf(singleKeys().long, process.platform),
+          },
+          recommended: keycodes.RECOMMENDED,
+        }
+        : null,
       _defaultTranscriptDir: paths.defaultTranscriptDir(),
     }),
     setConfig: (patch) => {
@@ -751,6 +804,21 @@ function buildIpcDeps() {
         if (!openaiCompat.isUrlAllowed(patch.polish.baseUrl)) {
           return { ok: false, reason: '清理端点必须是 https://（只有本机回环 127.0.0.1 / localhost 允许 http://）' };
         }
+      }
+      // 单键键位：config.validate 对非法值是「warn + 回退默认」，那在界面上表现为
+      // 显示的键名自己弹回去，用户看不出被拒了（同 polish.baseUrl 那段的理由）。
+      if (patch.热键 && (patch.热键.单键短输入 !== undefined || patch.热键.单键长录音 !== undefined)) {
+        const cur = singleKeys();
+        const next = {
+          short: patch.热键.单键短输入 !== undefined ? patch.热键.单键短输入 : cur.short,
+          long: patch.热键.单键长录音 !== undefined ? patch.热键.单键长录音 : cur.long,
+        };
+        for (const [k, v] of [['单键短输入', next.short], ['单键长录音', next.long]]) {
+          if (!Number.isInteger(v) || v <= 0) return { ok: false, reason: `热键.${k} 不是合法键码` };
+          if (keycodes.isBlocked(v)) return { ok: false, reason: keycodes.classify(v, process.platform).message };
+        }
+        const pair = keycodes.checkPair(next.short, next.long);
+        if (!pair.ok) return { ok: false, reason: pair.message };
       }
       const before = cfg;
       config.save(patch);
@@ -876,6 +944,15 @@ function buildIpcDeps() {
     listHistory: (n) => history.listRecent(n),
     copyText: (text) => { clipboard.writeText(text); return { ok: true }; },
     registerHotkey: (which, accel) => hotkeys.tryRegister(which, accel),
+    captureHotkey: (action, which) => {
+      if (!hotkeys) return { ok: false, reason: '热键还没初始化' };
+      if (action === 'cancel') {
+        hotkeys.cancelCapture();
+        return { ok: true };
+      }
+      // 失败原因原样回界面（「需要辅助功能权限」之类）——「点了录制没反应」最难自查
+      return hotkeys.beginCapture({ which, onResult: (r) => onHotkeyCaptured(which, r) });
+    },
     // 空数组 = 设置页的「选择音频文件…」按钮，让 main 弹多选对话框。
     // 文件对话框与 fs 都归 main，renderer 只经手路径（§3.2 / §24.2）。
     importFiles: (list) => (list.length === 0 ? pickAndImport() : importQueue.add(list)),

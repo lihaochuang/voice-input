@@ -17,30 +17,48 @@
 //    设置页顶部永远显示「组合键」，而同一个菜单里 describe()（普通方法，读闭包活变量）
 //    却显示「右 Option 单击」——一个菜单两种事实。test/hotkeys.test.js 有回归断言。
 //
+// ⑤ 单键键位**不再写死**：start(cfg) 从 cfg.热键.单键短输入 / 单键长录音 取，
+//    键码表与冲突规则搬到了纯模块 keycodes.js（config.js 也要用它）。
+//    下面的 KEYMAP / KEY_LABEL 只是「默认值」的别名，保留导出是因为托盘与老测试在用。
+// ⑥ 录制键位期间（beginCapture）feed() 一律不判定，否则用户为了录键按下的那一下
+//    会顺手开一次录音。录制期按下的键**不会被拦住**，照常传给前台应用（uiohook 不支持吞事件）。
+//
 // 加载期不碰 electron，也不碰 uiohook-napi：两者都在函数体里 require。
 const fs = require('fs');
 const EventEmitter = require('events');
 const logger = require('./logger');
 const paths = require('./paths');
+const keycodes = require('./keycodes');
 
 const MOD = 'hotkeys';
 
 // ───────────────────────── 纯常量与纯函数 ─────────────────────────
 
-// UiohookKey 的数值（uiohook-napi@1.5.5 dist/index.d.ts 导出）。
-// 写死数值而不是 require 包取值：钩子加载失败时这张表仍要能用（托盘文案要它）。
-const KEYCODE = { AltRight: 3640, MetaRight: 3676, CtrlRight: 3613 };
-
-/** 平台键位映射。short = 短输入，long = 长录音。 */
-const KEYMAP = {
-  darwin: { short: KEYCODE.AltRight /* 右 Option */, long: KEYCODE.MetaRight /* 右 Command */ },
-  win32: { short: KEYCODE.AltRight /* 右 Alt */, long: KEYCODE.CtrlRight /* 右 Ctrl */ },
+// 键码表的事实源是 keycodes.js（写死数值的理由见那个文件顶部 ①）。
+// 这三张表只是「默认键位」的视图，留着是因为托盘与 test/hotkeys.test.js 在用；
+// 用户自定义的键位走 state.targets，不在这里。
+const KEYCODE = {
+  AltRight: keycodes.KEY.AltRight,
+  MetaRight: keycodes.KEY.MetaRight,
+  CtrlRight: keycodes.KEY.CtrlRight,
 };
 
-/** 按平台的人类可读键名（托盘与设置页文案，评审 N4）。 */
+/** 平台**默认**键位。short = 短输入，long = 长录音。与 keycodes.DEFAULTS 深等（有测试盯着）。 */
+const KEYMAP = {
+  darwin: { ...keycodes.DEFAULTS.darwin },
+  win32: { ...keycodes.DEFAULTS.win32 },
+};
+
+/** 默认键位的人类可读键名（托盘与设置页文案，评审 N4）。 */
 const KEY_LABEL = {
-  darwin: { short: '右 Option', long: '右 Command' },
-  win32: { short: '右 Alt', long: '右 Ctrl' },
+  darwin: {
+    short: keycodes.labelOf(KEYMAP.darwin.short, 'darwin'),
+    long: keycodes.labelOf(KEYMAP.darwin.long, 'darwin'),
+  },
+  win32: {
+    short: keycodes.labelOf(KEYMAP.win32.short, 'win32'),
+    long: keycodes.labelOf(KEYMAP.win32.long, 'win32'),
+  },
 };
 
 const SUPPRESS_MS = 400; // 覆盖 osascript 80~150ms 与 PowerShell 宿主 ~50ms 的回写延迟
@@ -75,10 +93,17 @@ function validate(accelerator) {
   return { ok: true };
 }
 
-/** single 模式的判定状态。platform 决定 targets。 */
-function createState(platform = process.platform) {
+/**
+ * single 模式的判定状态。
+ * @param keys 可选 {short, long} 数值键码（来自配置）。不给就用平台默认。
+ */
+function createState(platform = process.platform, keys = null) {
   const km = keymapFor(platform);
-  return { holding: null, contaminated: false, downAt: 0, suppressUntil: 0, targets: { ...km } };
+  const targets = {
+    short: Number.isInteger(keys && keys.short) ? keys.short : km.short,
+    long: Number.isInteger(keys && keys.long) ? keys.long : km.long,
+  };
+  return { holding: null, contaminated: false, downAt: 0, suppressUntil: 0, capturing: false, targets };
 }
 
 /** 设置抑制窗口：paste.js 发按键前调，防自己的 Cmd/Ctrl+V 被钩子吃成一次按键。 */
@@ -95,10 +120,13 @@ function suppressIn(state, ms = SUPPRESS_MS, now = Date.now()) {
  *   up(其他)            → 不动状态
  * 抑制窗口内一律丢弃全部事件。
  * 判定不看按住时长：任何时长的「干净按下再松开」都算一次单击。
+ * state.capturing（正在录制键位）时一律不判定，连状态都不改——否则用户为了
+ * 录键按下的那一下会顺手开一次录音。
  */
 function feed(event, state) {
   const { type, keycode, t } = event || {};
   const now = typeof t === 'number' ? t : Date.now();
+  if (state.capturing) return null;
   if (state.suppressUntil && now < state.suppressUntil) return null;
 
   const { short, long } = state.targets;
@@ -176,6 +204,9 @@ function createController({ platform = process.platform, saveMode, notify } = {}
   let healthyTimer = null;
   let recheckTimer = null;
   let registered = { short: null, long: null };
+  let capture = null; // 正在录制键位：{ which, onResult, timer }
+  let swallowUp = null; // 刚录到的键，它配对的 keyup 要吞掉
+  let startedForCapture = false; // 钩子是为了录制才起的（combo 模式下录完要停掉）
 
   const label = labelFor(platform);
   const setMode = (m, why) => {
@@ -278,6 +309,11 @@ function createController({ platform = process.platform, saveMode, notify } = {}
     }
     const onKey = (type) => (e) => {
       try {
+        if (state.capturing) { onCaptureKey(type, e.keycode); return; }
+        if (swallowUp !== null && type === 'up' && e.keycode === swallowUp) {
+          swallowUp = null; // 刚录完键位的那一下松手，吞掉
+          return;
+        }
         const action = feed({ type, keycode: e.keycode, t: Date.now() }, state);
         if (action) bus.emit(action);
         callbackErrors = 0;
@@ -316,11 +352,73 @@ function createController({ platform = process.platform, saveMode, notify } = {}
     return { ok: true };
   }
 
+  // ───────────── 按键录制（设置页「录制」按钮） ─────────────
+
+  /** 收尾：清录制态，必要时把「只为录制而起」的钩子停掉。 */
+  function cancelCapture() {
+    if (capture && capture.timer) clearTimeout(capture.timer);
+    capture = null;
+    state.capturing = false;
+    state.holding = null;
+    state.contaminated = false;
+    if (startedForCapture) {
+      startedForCapture = false;
+      // combo 模式下钩子只是临时借用：留着它单键判定会和组合键一起触发，一次按键开两回录音。
+      if (mode !== 'single') stopHook();
+    }
+  }
+
+  function finishCapture(payload) {
+    const cb = capture && capture.onResult;
+    const which = capture && capture.which;
+    cancelCapture();
+    if (!cb) return;
+    try {
+      cb({ which, ...payload });
+    } catch (e) {
+      logger.error(MOD, `录制回调抛错：${e && e.message}`);
+    }
+  }
+
+  /** 录制期的按键：取**第一个 keydown** 就算录到了，配对的 keyup 吞掉。 */
+  function onCaptureKey(type, keycode) {
+    if (type !== 'down') return;
+    swallowUp = keycode;
+    finishCapture({ keycode });
+  }
+
+  /**
+   * 开始录制。钩子没在跑（combo 模式、或单键降级了）就先试着起一个，
+   * 失败把原因原样回给界面——「点了录制没反应」是最难自查的症状。
+   */
+  function beginCapture({ which, timeoutMs = 8000, onResult } = {}) {
+    if (which !== 'short' && which !== 'long') return { ok: false, reason: 'shape' };
+    cancelCapture();
+    if (!hookStarted) {
+      const r = startSingle();
+      if (!r.ok) return { ok: false, reason: r.reason };
+      startedForCapture = true;
+    }
+    swallowUp = null;
+    state.capturing = true;
+    state.holding = null;
+    state.contaminated = false;
+    capture = { which, onResult, timer: null };
+    capture.timer = setTimeout(() => finishCapture({ timeout: true }), timeoutMs);
+    return { ok: true };
+  }
+
   let currentCfg = { 热键: {} };
 
   /** 启动。cfg.热键.模式 为 'combo' 时直接走组合键，否则先试单键。 */
   function start(cfg) {
     currentCfg = cfg || { 热键: {} };
+    // 单键键位来自配置（缺键或非法值退平台默认）。setConfig 里已有
+    // `if (hotkeys && patch.热键) hotkeys.start(cfg)`，所以改完键位不用另加接线。
+    const d = keycodes.defaultsFor(platform);
+    const kk = currentCfg.热键 || {};
+    state.targets.short = Number.isInteger(kk.单键短输入) ? kk.单键短输入 : d.short;
+    state.targets.long = Number.isInteger(kk.单键长录音) ? kk.单键长录音 : d.long;
     const want = (currentCfg.热键 && currentCfg.热键.模式) || 'single';
     if (want === 'single') {
       const r = startSingle();
@@ -356,6 +454,7 @@ function createController({ platform = process.platform, saveMode, notify } = {}
   }
 
   function stop() {
+    cancelCapture();
     stopHook();
     stopCombo();
   }
@@ -372,11 +471,19 @@ function createController({ platform = process.platform, saveMode, notify } = {}
     switchMode,
     suppress,
     tryRegister,
+    beginCapture,
+    cancelCapture,
     state,
     label,
     /** 托盘与设置页的两行热键文案，按平台/模式取。 */
     describe() {
-      if (mode === 'single') return { short: `${label.short} 单击`, long: `${label.long} 单击` };
+      // single 分支读 state.targets 而不是 label：键位是用户可改的，写死默认键名会说谎
+      if (mode === 'single') {
+        return {
+          short: `${keycodes.labelOf(state.targets.short, platform)} 单击`,
+          long: `${keycodes.labelOf(state.targets.long, platform)} 单击`,
+        };
+      }
       return {
         short: registered.short || (currentCfg.热键 && currentCfg.热键.短输入) || 'Control+Shift+Space',
         long: registered.long || (currentCfg.热键 && currentCfg.热键.长录音) || 'Control+Shift+L',

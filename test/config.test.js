@@ -69,6 +69,45 @@ test('热键.模式 未知值回退 single', () => {
   assert.ok(warnings.some((w) => w.includes('热键.模式')));
 });
 
+test('单键键位默认值 = keycodes.defaultsFor(当前平台)', () => {
+  useTempDataDir();
+  const keycodes = require('../src/main/keycodes');
+  const d = keycodes.defaultsFor(process.platform);
+  const def = config.defaults();
+  assert.strictEqual(def.热键.单键短输入, d.short);
+  assert.strictEqual(def.热键.单键长录音, d.long);
+});
+
+test('单键键位非法（非整数 / 负数 / 黑名单键）→ 回退默认并记 warn', () => {
+  useTempDataDir();
+  const def = config.defaults();
+  for (const bad of ['3640', 3640.5, -1, 0, 99999999, 30 /* 字母 A，黑名单 */]) {
+    const { value, warnings } = config.validate({ 热键: { 单键短输入: bad } });
+    assert.strictEqual(value.热键.单键短输入, def.热键.单键短输入, `${bad} 没回退`);
+    assert.ok(warnings.some((w) => w.includes('热键.单键短输入')), `${bad} 没记 warn`);
+  }
+});
+
+test('两个单键键位相同 → 单键长录音 回退默认并记 warn（规则 b 的最后一道防线）', () => {
+  useTempDataDir();
+  const def = config.defaults();
+  const { value, warnings } = config.validate({ 热键: { 单键短输入: 91, 单键长录音: 91 } });
+  assert.strictEqual(value.热键.单键短输入, 91, '短输入是合法值，不该被连坐');
+  assert.strictEqual(value.热键.单键长录音, def.热键.单键长录音);
+  assert.ok(warnings.some((w) => w.includes('单键长录音')));
+});
+
+test('合法单键键位原样保留，且不影响 模式/短输入/长录音 三个老字段', () => {
+  useTempDataDir();
+  const { value, warnings } = config.validate({ 热键: { 单键短输入: 91, 单键长录音: 92 } });
+  assert.strictEqual(value.热键.单键短输入, 91);
+  assert.strictEqual(value.热键.单键长录音, 92);
+  assert.strictEqual(value.热键.模式, 'single');
+  assert.strictEqual(value.热键.短输入, 'Control+Shift+Space');
+  assert.strictEqual(value.热键.长录音, 'Control+Shift+L');
+  assert.deepStrictEqual(warnings, []);
+});
+
 test('providers 塞未知 id + 重复 id，结果仍是五个 id 的全排列', () => {
   useTempDataDir();
   const { value } = config.validate({

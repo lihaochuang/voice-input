@@ -50,6 +50,13 @@ const CHANNELS = {
   // 追加需求二·四：自动热词的台账管理（列表 / 移除 / 清空 / 黑名单 / 立刻跑一次）。
   // 四件事合成一条带 action 的通道，而不是开四条：它们是同一份资源的增删查。
   HOTWORDS_AUTO: 'hotwords:auto',
+  // 单键键位录制（v0.1.1 ①）。开始/取消合成一条带 action 的通道，照 hotwords:auto 的先例。
+  // 载荷 { action: 'start'|'cancel', which: 'short'|'long' }。
+  HOTKEY_CAPTURE: 'hotkey:capture',
+  // 录到键之后 main 回推结果：{ which, keycode, label, verdict, message }。
+  // 不能用 invoke 的返回值顶替：用户可能 8 秒都不按，而键名与冲突判定只有 main 算得出
+  // （keycodes.js 在 main 侧，renderer 碰不到）。
+  HOTKEY_CAPTURED: 'hotkey:captured',
 };
 
 // 每条通道的方向与机制。
@@ -88,6 +95,8 @@ const META = {
   'asr:reset': { dir: 'r2m', mech: 'invoke', target: 'settings' },
   'key:detect': { dir: 'r2m', mech: 'invoke', target: 'settings' },
   'hotwords:auto': { dir: 'r2m', mech: 'invoke', target: 'settings' },
+  'hotkey:capture': { dir: 'r2m', mech: 'invoke', target: 'settings' },
+  'hotkey:captured': { dir: 'm2r', mech: 'send', target: 'settings' },
 };
 
 /** 全部通道名。 */

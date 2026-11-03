@@ -204,10 +204,34 @@
   <p class="hint">
     单键靠全局键盘钩子实现，macOS 需要「辅助功能」权限。
     钩子加载失败、没权限、或上次崩在钩子里，都会自动降级成组合键——降级原因显示在最上面那行。
+    上面这个选项是「你想用哪种」，实际生效的看最上面那行。
   </p>
 
-  <h2>组合键</h2>
-  <p class="hint">点一下输入框然后按下你要的组合键。至少一个修饰键（⌃⌘⌥⇧）加恰好一个主键。</p>
+  <h2>单键键位 <span id="hk-single-badge" class="pill"></span></h2>
+  <p class="hint">
+    只在单键模式下生效。点「录制」然后按一下你想用的键。
+    推荐右侧修饰键（右 ⌥ / 右 ⌘ / 右 ⌃ / 右 ⇧）或 F13~F19，基本没人占用。
+    打字和导航要用的键（字母、数字、空格、方向键…）不能选。
+    录制时按下的那个键还是会被当前窗口收到，按一下就好。
+  </p>
+  <div class="field">
+    <label>短输入</label>
+    <span id="hk-single-short">（默认）</span>
+    <button id="hk-rec-short" type="button">录制</button>
+    <span id="hk-rec-short-msg" class="muted"></span>
+  </div>
+  <div class="field">
+    <label>长录音</label>
+    <span id="hk-single-long">（默认）</span>
+    <button id="hk-rec-long" type="button">录制</button>
+    <span id="hk-rec-long-msg" class="muted"></span>
+  </div>
+
+  <h2>组合键 <span id="hk-combo-badge" class="pill"></span></h2>
+  <p class="hint">
+    <b>只在组合键模式下生效</b>，单键模式下这两个键不注册。
+    点一下输入框然后按下你要的组合键。至少一个修饰键（⌃⌘⌥⇧）加恰好一个主键。
+  </p>
   <div class="field">
     <label for="hk-short">短输入</label>
     <input id="hk-short" class="accel" type="text" readonly placeholder="点这里按下组合键">

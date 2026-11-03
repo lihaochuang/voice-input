@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('vi', {
 
   // 热键
   registerHotkey: (which, accelerator) => ipcRenderer.invoke('hotkey:register', { which, accelerator }),
+  // 单键键位录制：action ∈ start | cancel，which ∈ short | long
+  captureHotkey: (action, which) => ipcRenderer.invoke('hotkey:capture', { action, which }),
+  onHotkeyCaptured: (fn) => ipcRenderer.on('hotkey:captured', (_e, payload) => fn(payload)),
 
   // 目录与文件
   pickTranscriptDir: (kind) => ipcRenderer.invoke('dialog:pickDir', { kind }),
