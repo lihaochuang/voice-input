@@ -40,6 +40,7 @@ const autoHotwordsMod = require('./autohotwords');
 const secret = require('./secret');
 const asr = require('./asr');
 const openaiCompat = require('./asr/openai-compat'); // isUrlAllowed：清理端点的 N5 校验
+const audiohealth = require('./audiohealth'); // 零块自愈的三级升级状态机（纯模块）
 const hotkeysMod = require('./hotkeys');
 const keycodes = require('./keycodes'); // 键名与三条冲突规则：renderer 拿不到它，判定只能在 main
 const pasteMod = require('./paste');
@@ -68,6 +69,7 @@ let stopRetryLoop = null;
 let importQueue = null;
 let watcher = null;
 let decoder = null;
+let audioHealth = null; // bootstrap 里建，必须早于 createRecorderWindow()（console-message 要用它）
 let cfg = config.defaults();
 let encryptionOk = false;
 let micReady = null; // null = 还没预检
@@ -128,6 +130,9 @@ function createDecoder() {
 
   return {
     isActive: (jobId) => Boolean(job) && job.jobId === jobId,
+    // 「现在有没有解码在跑」。isActive 要先知道 jobId，而零块自愈那边只想知道
+    // 「能不能把录音窗 destroy 掉」，它手里没有任何 jobId（见 recreateRecorderWindow）。
+    isBusy: () => Boolean(job),
     onChunk(jobId, buf) {
       if (!job || job.jobId !== jobId) return;
       try {
@@ -237,9 +242,18 @@ function createRecorderWindow() {
   // 转进 app.log，否则「按了热键什么都没发生」在日志上完全无痕。
   recorderWin.webContents.on('console-message', (e) => {
     const lvl = e && e.level;
-    const line = `recorder console: ${(e && e.message) || ''}`;
+    const msg = (e && e.message) || '';
+    const line = `recorder console: ${msg}`;
     if (lvl === 'error') logger.error(MOD, line);
     else logger.debug(MOD, line);
+    // Chromium 的设备层错误只以 console 输出存在（`BaseAudioContext` 没有 onerror
+    // 事件，renderer 那边截不到——原来那个 ctx.onerror 是死代码，已删）。
+    // 这条实测晚到 10 秒（日志 15:52:16 零块、15:52:24 才报），当时录音已经结束，
+    // 所以不立刻重建，只标记「下次录音前先重建」（见 startRecording）。
+    if (/AudioContext encountered an error/i.test(msg)) {
+      logger.error(MOD, 'AudioContext 报告设备或渲染器错误，下次录音前先重建音频图');
+      if (audioHealth) audioHealth.deviceError();
+    }
   });
   recorderWin.loadFile(path.join(RENDERER, 'recorder.html'));
   recorderWin.webContents.on('render-process-gone', (_e, details) => {
@@ -247,10 +261,38 @@ function createRecorderWindow() {
     if (tray) tray.warn('录音组件重启了一次');
     // 解码期间崩了要先把那个 job 判失败（H3），否则队列永远卡在「解码中」
     if (decoder) decoder.crashed();
+    // 换了渲染进程，音频图跟着全新 —— 之前攒的连续零块计数作废，
+    // 不清的话下一次零块会直接跳到 alert，吓用户。
+    if (audioHealth) audioHealth.reset();
     recorderWin = null;
     setTimeout(createRecorderWindow, 300);
   });
   return recorderWin;
+}
+
+/**
+ * 二级自愈：销毁重建整个隐藏窗（④-d）。
+ * 为什么要到这一级：实测 renderer 内重建音频图救不回来，两次都是整个应用重启才好
+ * （日志 15:51:39 / 15:53:35）。换一个渲染进程就是「重启应用」真正起作用的那部分。
+ * 有解码任务在跑时跳过：用户导入的音频比自愈更不能打断，零块那条链下一次会话还会再判一次。
+ */
+function recreateRecorderWindow() {
+  if (decoder && decoder.isBusy()) {
+    logger.warn(MOD, '有解码任务在跑，这次不重建录音窗（等下一次会话再判）');
+    return;
+  }
+  if (!recorderWin || recorderWin.isDestroyed()) {
+    logger.warn(MOD, '录音窗已经不在了，跳过重建（render-process-gone 的重建流程会接上）');
+    return;
+  }
+  logger.error(MOD, '连续零块升级到二级：销毁重建隐藏录音窗');
+  if (tray) tray.warn('录音组件重启了一次');
+  // 照 render-process-gone 的做法：destroy 会让在飞的解码永远收不到回复，
+  // 先把那个 job 判失败走原样上传降级，否则队列卡在「解码中」。
+  if (decoder) decoder.crashed();
+  recorderWin.destroy();
+  recorderWin = null;
+  createRecorderWindow();
 }
 
 /**
@@ -425,6 +467,32 @@ function onOpus(sessionId, buf) {
   for (const w of waiters) w(buf);
 }
 
+/**
+ * 零块自愈的三级升级（④）。只由 collect() 调，也就是只给**热键会话**用：
+ * 补转路径（retryOne）读的是队列里已经落盘的音频，压根不经过 collect()，
+ * 所以它既不会被算成一次零块、也不会触发重建 —— 这一点是故意的，
+ * 否则「攒了一堆补转」会被误判成采集坏了。
+ */
+function healSession({ sessionId, chunkCount, durationSec }) {
+  const h = audioHealth.onSession({ chunkCount, durationSec });
+  if (h.action === 'none') return;
+  const head = `会话 ${sessionId} 零块（连续第 ${h.consecutiveZero} 次）`;
+  if (h.action === 'rebuild') {
+    logger.error(MOD, `${head}：命令 recorder 重建音频图`);
+    if (recorderWin && !recorderWin.isDestroyed()) {
+      recorderWin.webContents.send(CHANNELS.CAPTURE_REBUILD, {});
+    }
+  } else if (h.action === 'reload') {
+    logger.error(MOD, `${head}：重建音频图没救回来，升级到重建录音窗`);
+    recreateRecorderWindow();
+  } else {
+    // 三级：别再静默重试了。实测到这一步只有退出重开能恢复，用户必须知道。
+    logger.error(MOD, `${head}：两级自愈都没救回来，提示用户退出重开`);
+    if (tray) tray.warn('录音采集持续异常，请退出应用重开');
+    notify('录音采集持续异常：麦克风可能被其他程序占用。请退出应用重开；仍不行就重启电脑');
+  }
+}
+
 /** 等 opus 已到且 PCM 流已结束，**超时 3 秒以已有数据继续**（§4.5）。 */
 function collect({ sessionId, timeoutMs }) {
   const t = trackOf(sessionId);
@@ -462,6 +530,12 @@ function collect({ sessionId, timeoutMs }) {
     // 可观测判据（§4.3 / §21.2）：录 3 秒该会话的 PCM 块计数应 ≈ 3000ms/256ms ≈ 11±1。
     // 为 0 就是 worklet 没被拉起（sink 漏接或 context 不是 running），走 §15-42。
     logger.info(MOD, `会话 ${sessionId} 汇合：PCM 块 ${t.chunkCount} 个、${durationSec.toFixed(2)}s、opus ${opus ? opus.length : 0} 字节`);
+    // ④ 零块自愈的**权威判定点**。为什么在这里而不在 renderer：
+    // 权限框弹着时 ensureGraph 挂住、MediaRecorder 从来没起来 → onstop 不发生 →
+    // renderer 的 markDead 一次都没被调用（日志 15:49~15:50 连续四次零块就是这样，
+    // opus 0 字节而不是 110 字节的空容器就是「MediaRecorder 没起来」的指纹）。
+    // 这里的 chunkCount 每次会话都有，是唯一可靠的信号源。
+    if (audioHealth) healSession({ sessionId, chunkCount: t.chunkCount, durationSec });
     return {
       wavPath: t.headerWritten ? t.wavPath : null,
       webmPath: opus ? t.webmPath : null,
@@ -544,6 +618,13 @@ const coolingProviders = () => {
 
 function startRecording(sessionId, mode) {
   if (recorderWin && !recorderWin.isDestroyed()) {
+    // 上次录完之后才收到的设备层错误（console-message 实测晚到 10 秒）在这里兑现。
+    // 两条消息的先后是安全的：renderer 收到 rebuild 只置脏 + teardown，
+    // 真正的建图在 capture:start 触发的 ensureGraph 里，而它有 in-flight 锁。
+    if (audioHealth && audioHealth.pendingRebuild()) {
+      logger.warn(MOD, '上次收到过 AudioContext 设备错误，本次录音前先重建音频图');
+      recorderWin.webContents.send(CHANNELS.CAPTURE_REBUILD, {});
+    }
     recorderWin.webContents.send(CHANNELS.CAPTURE_START, { sessionId, mode });
   }
   if (tray) tray.startRecording(() => session.elapsedSec());
@@ -1090,6 +1171,10 @@ function bootstrap() {
   cfg = config.load();
   logPermissionStatus();
   if (process.platform === 'darwin') app.dock.hide();
+
+  // ②.0 零块自愈的状态机。必须早于 createRecorderWindow()：
+  // 那里的 console-message 回调一挂上就可能截到设备层错误。
+  audioHealth = audiohealth.create({});
 
   // ② 隐藏 recorder 窗
   createRecorderWindow();
