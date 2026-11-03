@@ -23,6 +23,8 @@ const HOTWORDS_MAX_CHARS = 20000;
 const PROVIDER_IDS = ['dashscope', 'groq', 'openai', 'custom', 'whispercpp'];
 /** hotwords:auto 的封闭动作集。不在表里的一律拒，不做字符串拼装。 */
 const AUTO_ACTIONS = ['list', 'remove', 'clear', 'blacklist', 'unblacklist', 'run'];
+/** hotkey:capture 的封闭动作集。 */
+const CAPTURE_ACTIONS = ['start', 'cancel'];
 
 /** 本应用自己的 file:// 源？（纯函数，便于测试） */
 function isOwnUrl(url) {
@@ -249,6 +251,13 @@ function register(deps) {
     return deps.registerHotkey(which, accelerator);
   });
 
+  // 单键键位录制。录到的键码由 main 自己从钩子拿，renderer 只能说「开始/取消录哪一个」。
+  handle(CHANNELS.HOTKEY_CAPTURE, ({ action, which } = {}) => {
+    if (which !== 'short' && which !== 'long') return { ok: false, reason: 'shape' };
+    if (!CAPTURE_ACTIONS.includes(action)) return { ok: false, reason: 'shape' };
+    return deps.captureHotkey(action, which);
+  });
+
   handle(CHANNELS.DIALOG_PICK_DIR, ({ kind } = {}) => deps.pickDir(typeof kind === 'string' ? kind : 'transcript'));
   handle(CHANNELS.SHELL_OPEN_DATA_DIR, () => deps.openDataDir());
   handle(CHANNELS.SHELL_OPEN_PATH, ({ path: p } = {}) => {
@@ -287,4 +296,5 @@ module.exports = {
   OPUS_MAX_BYTES,
   PROVIDER_IDS,
   AUTO_ACTIONS,
+  CAPTURE_ACTIONS,
 };

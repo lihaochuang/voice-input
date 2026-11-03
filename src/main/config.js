@@ -14,6 +14,9 @@ const fs = require('fs');
 const paths = require('./paths');
 const logger = require('./logger');
 const { normalizePolishBaseUrl } = require('./polish');
+// keycodes 是纯数据 + 纯函数模块（不 require electron / fs / hotkeys），
+// 所以引它**不破坏**「config 不依赖 hotkeys」那条约束——裸 Node 单测照样能加载。
+const keycodes = require('./keycodes');
 
 const PROVIDER_IDS = ['dashscope', 'groq', 'openai', 'custom', 'whispercpp'];
 const MODEL_RE = /^[A-Za-z0-9._\-]+$/;
@@ -30,7 +33,15 @@ function defaults() {
     // 热词自动提炼（设计决策.md 追加需求二·四）。阈值默认 5 而不是 mine 的 3：
     // 自动入表没有人工闸，门槛必须更严，否则一次听错重复几遍就进表了。
     热词自动提炼: { 开启: true, 频率: 'weekly', 阈值: 5 },
-    热键: { 模式: 'single', 短输入: 'Control+Shift+Space', 长录音: 'Control+Shift+L' },
+    // 短输入/长录音是 combo 模式的 accelerator；单键短输入/单键长录音 是 single
+    // 模式的 uiohook 数值键码。两套键位各自独立存，切模式不会互相冲掉。
+    热键: {
+      模式: 'single',
+      短输入: 'Control+Shift+Space',
+      长录音: 'Control+Shift+L',
+      单键短输入: keycodes.defaultsFor(process.platform).short,
+      单键长录音: keycodes.defaultsFor(process.platform).long,
+    },
     // maxSeconds 故意不写进默认值：缺键 = 用后端自己的 limits.maxSeconds（§6.2），
     // 写死在这里会和 asr/types.js 的 LIMITS 形成两个事实源。
     providers: [
@@ -63,6 +74,9 @@ function isUrlOk(raw) {
 // 热键串的形状校验。真正的 accelerator 合法性由 hotkeys.validate() 负责（FEAT-003），
 // 这里只拦明显坏值，避免 config 反过来依赖 hotkeys（它要碰 electron）。
 const isAccel = (v) => isStr(v) && v.trim() !== '' && !/\s/.test(v);
+
+/** 单键键位：uiohook 数值键码，且不在打字/导航键黑名单里。 */
+const isKeycode = (v) => Number.isInteger(v) && v > 0 && v <= 70000 && !keycodes.isBlocked(v);
 
 function validateProvider(raw, warn) {
   if (!isObj(raw) || !PROVIDER_IDS.includes(raw.id)) {
@@ -158,9 +172,27 @@ function validate(raw) {
     '热键',
     raw.热键,
     def.热键,
-    { 模式: { ok: (v) => v === 'single' || v === 'combo' }, 短输入: { ok: isAccel }, 长录音: { ok: isAccel } },
+    {
+      模式: { ok: (v) => v === 'single' || v === 'combo' },
+      短输入: { ok: isAccel },
+      长录音: { ok: isAccel },
+      // 单键键位是 uiohook 的数值键码。上限 70000 覆盖方向键那一段（57416~57424）。
+      // 黑名单在这里就拦住：配置文件是可以手改的，界面上的校验不是防线。
+      单键短输入: { ok: isKeycode },
+      单键长录音: { ok: isKeycode },
+    },
     warn
   );
+  // 规则 (b) 的最后一道防线。两个角色撞同一个键时 feed() 会把长录音当短输入，
+  // 症状是「长录音键按了只出短输入」——所以宁可把长录音退回默认，也不留这个状态。
+  if (value.热键.单键短输入 === value.热键.单键长录音) {
+    warn('热键.单键长录音 与 单键短输入 相同，已回退默认');
+    value.热键.单键长录音 = def.热键.单键长录音;
+    // 默认值本身也可能被短输入占了（用户把短输入录成了默认的长录音键），那就两个都退默认
+    if (value.热键.单键短输入 === value.热键.单键长录音) {
+      value.热键.单键短输入 = def.热键.单键短输入;
+    }
+  }
   value.polish = mergeNested(
     'polish',
     raw.polish,

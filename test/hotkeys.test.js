@@ -118,6 +118,43 @@ test('win32 的 state 认 3613 为长录音键', () => {
   assert.strictEqual(hk.feed({ type: 'up', keycode: 3613, t: 2 }, s), 'long-toggle');
 });
 
+test('自定义键位：createState 第二参给了就用它判定，默认键反而不认', () => {
+  const s = hk.createState('darwin', { short: 91 /* F13 */, long: 92 /* F14 */ });
+  hk.feed({ type: 'down', keycode: 91, t: 1 }, s);
+  assert.strictEqual(hk.feed({ type: 'up', keycode: 91, t: 2 }, s), 'short-toggle');
+  hk.feed({ type: 'down', keycode: 92, t: 3 }, s);
+  assert.strictEqual(hk.feed({ type: 'up', keycode: 92, t: 4 }, s), 'long-toggle');
+  // 默认的右 Option 已经不是热键了，按它不该有反应
+  hk.feed({ type: 'down', keycode: 3640, t: 5 }, s);
+  assert.strictEqual(hk.feed({ type: 'up', keycode: 3640, t: 6 }, s), null);
+});
+
+test('不传 keys 时 createState 行为与原来完全一致', () => {
+  const a = hk.createState('darwin');
+  assert.deepStrictEqual(a.targets, hk.KEYMAP.darwin);
+  assert.deepStrictEqual(hk.createState('win32').targets, hk.KEYMAP.win32);
+  // 非法值（字符串键码是手改配置的常见写法）也退默认，不能把 targets 弄成 NaN
+  assert.deepStrictEqual(hk.createState('darwin', { short: '91', long: null }).targets, hk.KEYMAP.darwin);
+});
+
+test('KEYMAP 与 keycodes.DEFAULTS 深等（防两张表漂移）', () => {
+  const keycodes = require('../src/main/keycodes');
+  assert.deepStrictEqual(hk.KEYMAP, keycodes.DEFAULTS);
+  assert.strictEqual(hk.KEY_LABEL.darwin.short, keycodes.labelOf(keycodes.DEFAULTS.darwin.short, 'darwin'));
+});
+
+test('录制键位期间 feed 一律不判定（否则录键那一下会顺手开一次录音）', () => {
+  const s = hk.createState('darwin');
+  s.capturing = true;
+  assert.strictEqual(hk.feed({ type: 'down', keycode: 3640, t: 1 }, s), null);
+  assert.strictEqual(s.holding, null, '录制期连状态都不该改');
+  assert.strictEqual(hk.feed({ type: 'up', keycode: 3640, t: 2 }, s), null);
+  s.capturing = false;
+  // 录制结束后恢复正常判定
+  hk.feed({ type: 'down', keycode: 3640, t: 3 }, s);
+  assert.strictEqual(hk.feed({ type: 'up', keycode: 3640, t: 4 }, s), 'short-toggle');
+});
+
 test('非 darwin 上 accessibilityTrusted 直接返回 true（平台门控，评审 N1）', () => {
   if (process.platform === 'darwin') return; // darwin 上会去碰 electron，这里只验门控
   assert.strictEqual(hk.accessibilityTrusted(), true);

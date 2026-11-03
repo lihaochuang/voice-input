@@ -783,21 +783,39 @@ function accelFrom(e) {
   return [...mods, key].join('+');
 }
 
+/** 实际生效的模式。lastState 是 main 推的活状态，cfg._hotkeys 是开窗那一刻的快照。 */
+const effectiveMode = () => (lastState.mode || (cfg._hotkeys || {}).mode) === 'single' ? 'single' : 'combo';
+
 function renderHotkeyModeLine() {
   const hk = cfg._hotkeys || {};
-  const mode = (lastState.mode || hk.mode) === 'single' ? '单键' : '组合键';
+  const single = effectiveMode() === 'single';
   const reason = lastState.reason || hk.reason;
-  $('#hk-mode-line').textContent = reason
-    ? `当前生效：${mode}模式（降级原因：${reason}）`
-    : `当前生效：${mode}模式`;
+  // 两个事实源：用户在上面选的（cfg.热键.模式）与实际跑起来的（可能被四层降级改掉）。
+  // 不说清「哪一组此刻不起作用」，用户就会去调一组根本没生效的键。
+  const head = reason
+    ? `当前生效：${single ? '单键' : '组合键'}模式（降级原因：${reason}）`
+    : `当前生效：${single ? '单键' : '组合键'}模式`;
+  const tail = single
+    ? '——下面「组合键」那一组此刻不起作用'
+    : '——下面「单键键位」那一组此刻不起作用';
+  $('#hk-mode-line').textContent = `${head}${tail}`;
 }
 
 function renderHotkeys() {
   const keys = (cfg.热键 || {});
+  const hk = cfg._hotkeys || {};
+  const labels = hk.singleLabels || {};
+  $('#hk-single-short').textContent = labels.short || '（默认）';
+  $('#hk-single-long').textContent = labels.long || '（默认）';
   $('#hk-short').value = keys.短输入 || '';
   $('#hk-long').value = keys.长录音 || '';
+  // radio 勾的是「用户想要的模式」，与上面那行「实际生效的」分开显示——这正是
+  // ③ 要解决的歧义：降级时两者不一致，各自都得摆出来。
   const mode = keys.模式 || 'combo';
   for (const r of $$('input[name="hk-mode"]')) r.checked = r.value === mode;
+  const single = effectiveMode() === 'single';
+  $('#hk-single-badge').textContent = single ? '当前生效' : '当前未生效';
+  $('#hk-combo-badge').textContent = single ? '当前未生效' : '当前生效';
   renderHotkeyModeLine();
 }
 
@@ -822,6 +840,78 @@ function wireAccelInput(sel, which, msgSel) {
   });
 }
 
+// ── 单键键位录制 ──
+// 录制期间 main 侧的 feed() 不判定，所以按下的键不会开录音；但它**会**照常传给
+// 当前前台应用（uiohook 不支持吞事件），界面提示里已经说了「按一下就好」。
+
+const REC = {
+  short: { btn: '#hk-rec-short', msg: '#hk-rec-short-msg', field: '热键.单键短输入' },
+  long: { btn: '#hk-rec-long', msg: '#hk-rec-long-msg', field: '热键.单键长录音' },
+};
+let capturing = null; // 正在录哪一个：'short' | 'long' | null
+
+function setRecBusy(which, busy) {
+  for (const w of ['short', 'long']) {
+    const b = $(REC[w].btn);
+    if (!b) continue;
+    // 录制中只有当前那个按钮可点（点它=取消），另一个禁掉，免得两个录制态打架
+    b.disabled = busy && w !== which;
+    if (w === which) b.textContent = busy ? '取消' : '录制';
+    else if (!busy) b.textContent = '录制';
+  }
+}
+
+async function stopCapture(which) {
+  capturing = null;
+  setRecBusy(which, false);
+  await api.captureHotkey('cancel', which);
+}
+
+async function startCapture(which) {
+  const { msg } = REC[which];
+  if (capturing) await stopCapture(capturing);
+  capturing = which;
+  setRecBusy(which, true);
+  say(msg, '请按下你想用的键…');
+  const r = await api.captureHotkey('start', which);
+  if (!r || r.ok === false) {
+    capturing = null;
+    setRecBusy(which, false);
+    // main 把原因原样回来（如「无辅助功能权限」），不翻译成「失败了」那种废话
+    say(msg, (r && (r.reason || r.message)) || '录制启动失败', true);
+  }
+}
+
+/** 存一个录到的键位。main 侧还会再校验一遍（renderer 不可信）。 */
+async function saveSingleKey(which, keycode, msgSel) {
+  const field = which === 'short' ? '单键短输入' : '单键长录音';
+  const saved = await saveConfig({ 热键: { [field]: keycode } }, msgSel);
+  if (!saved) return;
+  renderHotkeys(); // saveConfig 已经重新拉过 config，这里渲染的是落盘后的真实值
+  say(msgSel, '已生效');
+}
+
+function onHotkeyCaptured(p) {
+  const which = p && p.which;
+  if (!which || !REC[which]) return;
+  const { msg } = REC[which];
+  capturing = null;
+  setRecBusy(which, false);
+  const label = p.label || `键码 ${p.keycode}`;
+  if (p.verdict === 'ok') { saveSingleKey(which, p.keycode, msg); return; }
+  if (p.verdict === 'blocked') { say(msg, p.message || `${label} 不能用`, true); return; }
+  if (p.verdict === 'timeout') { say(msg, p.message || '没收到按键，已取消录制', true); return; }
+  // warn：警告但允许强行设置（规则 c）。哪些键真被占用只有用户自己知道，
+  // 我们没资格替他拒——所以给一个「仍然使用」按钮，点了才存。
+  const node = $(msg);
+  if (!node) return;
+  node.textContent = '';
+  node.style.color = 'var(--bad)';
+  const btn = el('button', { type: 'button', class: 'link', text: '仍然使用' });
+  btn.addEventListener('click', () => saveSingleKey(which, p.keycode, msg));
+  node.append(document.createTextNode(`${label}：${p.message || '可能会误触发'} `), btn);
+}
+
 function wireHotkeys() {
   wireAccelInput('#hk-short', 'short', '#hk-short-msg');
   wireAccelInput('#hk-long', 'long', '#hk-long-msg');
@@ -832,6 +922,16 @@ function wireHotkeys() {
       renderHotkeys();
     });
   }
+  for (const which of ['short', 'long']) {
+    $(REC[which].btn).addEventListener('click', () => {
+      if (capturing === which) stopCapture(which);
+      else startCapture(which);
+    });
+  }
+  // 切走或关窗时要收尾：录制态留在 main 侧会把下一次真按键吞掉
+  window.addEventListener('hashchange', () => { if (capturing) stopCapture(capturing); });
+  window.addEventListener('beforeunload', () => { if (capturing) api.captureHotkey('cancel', capturing); });
+  api.onHotkeyCaptured(onHotkeyCaptured);
 }
 
 // @@HOTKEYS@@
