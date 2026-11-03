@@ -127,24 +127,45 @@ function markDead(kind, msg) {
  * 「ctx.state === 'running'、worklet 非空、但源流已经死了」的僵尸图——
  * 下面那行守卫判它健康就一直复用，于是**之后每次录音都零块**。
  * 所以先等在飞的那次建完再判守卫，而不是判完再建。
+ *
+ * 等锁必须用 **while 而不是 if**：那四次零块是四次重叠的会话，权限框挂着时
+ * 第一次卡在 getUserMedia，后三次全排在同一个 building 上；第一次失败后
+ * 这三个同时醒来，`if` 只在入口看一眼锁、醒来不回看，于是三个各自又建一遍图
+ * （buildGraph 中间有三个 await，逐段赋值的 ctx/stream/srcNode/worklet 交错后
+ * 还是那个僵尸图）。改成 while，醒来的调用方会重新回看锁、排到新的那次后面。
  */
 let building = null;
+
+/**
+ * 把一次「改图」的操作排到在飞的那次后面，并自己占住锁。
+ * teardown 也必须走这里：它在建图途中到达会把 ctx 置 null，让在飞的 buildGraph
+ * 抛 TypeError（后果不致命，但那是条白跑的错误上报）。
+ */
+function serialize(fn) {
+  const prev = building;
+  const p = (async () => {
+    if (prev) {
+      try { await prev; } catch { /* 上一次的失败由它自己的调用方 report 过了 */ }
+    }
+    return fn();
+  })();
+  building = p;
+  const release = () => { if (building === p) building = null; };
+  p.then(release, release);
+  return p;
+}
+
 async function ensureGraph() {
-  if (building) {
+  while (building) {
     // 别管上一次成没成：成了下面守卫会放行，没成 graphDead/ctx 的状态会让它重建
-    try { await building; } catch { /* 上一次的失败由它自己的调用方 report 过了 */ }
+    try { await building; } catch { /* 同上 */ }
   }
   if (!graphDead && ctx && ctx.state === 'running' && worklet) return;
-  building = (async () => {
+  await serialize(async () => {
     await teardown();
     graphDead = false;
     await buildGraph();
-  })();
-  try {
-    await building;
-  } finally {
-    building = null;
-  }
+  });
 }
 
 async function teardown() {
@@ -229,11 +250,12 @@ api.onStop(() => { stopCapture(); });
 // main 判定零块后的强制重建。**无条件**销毁，不看 ctx.state —— 实测它会说谎
 // （自报 running/16000Hz、track enabled=true，却一块 PCM 都不送）。
 // 只置脏 + teardown，不在这里重建：下次 startCapture 的 ensureGraph 会建，
-// 那时才知道该用哪个设备，也避免和在飞的那次建图抢（有 in-flight 锁，但没必要）。
+// 那时才知道该用哪个设备。teardown 走 serialize 排到在飞的那次建图后面——
+// 直接调会在建图途中把 ctx 置 null，让那半套图抛 TypeError。
 if (api.onRebuild) {
   api.onRebuild(() => {
     graphDead = true;
-    teardown().catch(() => { /* 本来就是要扔掉它 */ });
+    serialize(() => teardown()).catch(() => { /* 本来就是要扔掉它 */ });
   });
 }
 
