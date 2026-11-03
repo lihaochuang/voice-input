@@ -288,6 +288,13 @@ function createController({ platform = process.platform, saveMode, notify } = {}
 
   /** 四层降级：加载失败 → start 抛错 → 无辅助功能权限 → 上次崩溃的哨兵残留。 */
   function startSingle() {
+    // 钩子已经在跑就直接认成功：键位是从 state.targets 读的，改完键位不需要重挂钩子。
+    // 不守这一下的后果：每次录完键位都 saveConfig → setConfig → start(cfg) → 这里，
+    // 于是又挂一对 keydown/keyup 监听、又起一个 recheckTimer（旧 handle 被覆盖、
+    // 旧 interval 永不清）。第二次录制时 keydown 被两个监听各处理一次，第一个已
+    // finishCapture 把 capturing 置 false，第二个就落到正常分支调 feed——重录同一个
+    // 当前生效的键时真会顺手开一次录音，与文件头 ⑥ 的承诺矛盾。
+    if (hookStarted) return { ok: true };
     if (sentinelExists()) {
       // 第 4 层：上次在钩子活跃期间非正常退出。强制 combo 并**持久化**，防启动循环。
       clearSentinel();
@@ -361,6 +368,10 @@ function createController({ platform = process.platform, saveMode, notify } = {}
     state.capturing = false;
     state.holding = null;
     state.contaminated = false;
+    // swallowUp 也是录制残留：combo 模式下录完会 stopHook()，配对的 keyup 再也不会来，
+    // 这个标记就一直挂着。之后切成单键模式、而那个键码正好等于生效的 short/long 时，
+    // 第一次按它的 keyup 会被吞键分支截走、feed 收不到 up，这一下白按。
+    swallowUp = null;
     if (startedForCapture) {
       startedForCapture = false;
       // combo 模式下钩子只是临时借用：留着它单键判定会和组合键一起触发，一次按键开两回录音。
@@ -383,8 +394,10 @@ function createController({ platform = process.platform, saveMode, notify } = {}
   /** 录制期的按键：取**第一个 keydown** 就算录到了，配对的 keyup 吞掉。 */
   function onCaptureKey(type, keycode) {
     if (type !== 'down') return;
-    swallowUp = keycode;
+    // 顺序不能反：finishCapture 会走 cancelCapture，而它要清 swallowUp（见那里的注释），
+    // 先设就会被自己清掉，这一下的 keyup 漏进 feed。
     finishCapture({ keycode });
+    swallowUp = keycode;
   }
 
   /**
