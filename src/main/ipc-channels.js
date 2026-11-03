@@ -57,6 +57,10 @@ const CHANNELS = {
   // 不能用 invoke 的返回值顶替：用户可能 8 秒都不按，而键名与冲突判定只有 main 算得出
   // （keycodes.js 在 main 侧，renderer 碰不到）。
   HOTKEY_CAPTURED: 'hotkey:captured',
+  // 强制重建音频图（v0.1.1 ④-a/-d）。零块的权威判定在 main 侧 collect()，
+  // 判出来之后得有办法命令 renderer 丢掉那套僵尸图——这就是那条命令。
+  // 不能靠 renderer 自己发现：它看到的 ctx.state 会说谎（实测自报 running 却一块不送）。
+  CAPTURE_REBUILD: 'capture:rebuild',
 };
 
 // 每条通道的方向与机制。
@@ -97,6 +101,7 @@ const META = {
   'hotwords:auto': { dir: 'r2m', mech: 'invoke', target: 'settings' },
   'hotkey:capture': { dir: 'r2m', mech: 'invoke', target: 'settings' },
   'hotkey:captured': { dir: 'm2r', mech: 'send', target: 'settings' },
+  'capture:rebuild': { dir: 'm2r', mech: 'send', target: 'recorder' },
 };
 
 /** 全部通道名。 */

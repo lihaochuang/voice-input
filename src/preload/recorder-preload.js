@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('vi', {
   // main → recorder
   onStart: (fn) => ipcRenderer.on('capture:start', (_e, payload) => fn(payload)),
   onStop: (fn) => ipcRenderer.on('capture:stop', (_e, payload) => fn(payload)),
+  // main 判定本次会话零块后命令强制重建音频图（v0.1.1 ④）
+  onRebuild: (fn) => ipcRenderer.on('capture:rebuild', (_e, payload) => fn(payload)),
   // decode:request 不在这里暴露成回调，见文件末尾那段：它带着一个
   // MessagePort，而 MessagePort 过不了 contextBridge。
 

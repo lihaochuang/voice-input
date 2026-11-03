@@ -64,9 +64,18 @@ async function buildGraph() {
   // （实测晚到 10 秒），在那之前 ensureGraph() 看 state 是 running 就一直复用
   // 这个死掉的 context，于是**每一次录音都录不到东西**。所以除了听 error，
   // 还要在 stop 时按「有没有收到块」自愈（见 markDead 的调用处）。
-  ctx.onerror = () => { markDead('audio-context', 'AudioContext 报告设备或渲染器错误'); };
-  ctx.onstatechange = () => {
-    if (ctx && ctx.state !== 'running') markDead('audio-context', `AudioContext 变成 ${ctx.state}`);
+  // 这里原来给 ctx 挂过一个 onerror 回调 —— 已删，`BaseAudioContext` 没有这个事件，
+  // 那只是个永不触发的自有属性（白等了一个兜底）。Chromium 那条
+  // 'The AudioContext encountered an error from the audio device or the WebAudio renderer.'
+  // 是内部 console 输出，唯一能截到它的地方是 main 的 console-message 回调，
+  // 它会调 audiohealth.deviceError() 标记「下次录音前先重建」（main.js ④-c）。
+  //
+  // onstatechange 的闭包必须认自己那个 context：重建之后旧 context 关闭时也会回调一次，
+  // 读模块级 ctx 就会把**刚建好的新图**标死，症状是每次录音都白重建一遍。
+  const self = ctx;
+  self.onstatechange = () => {
+    if (self !== ctx) return; // 旧 context 的回调，与现在这套图无关
+    if (ctx.state !== 'running') markDead('audio-context', `AudioContext 变成 ${ctx.state}`);
   };
 
   await ctx.audioWorklet.addModule('pcm-worklet.js');
@@ -109,11 +118,33 @@ function markDead(kind, msg) {
   report(kind, msg);
 }
 
+/**
+ * 保证有一套可用的图。**必须串行**，这是实测踩出来的坑：
+ * 日志 15:49:36~15:50:23 那四次「PCM 块 0 个、opus 0 字节」就是重入造出来的。
+ * 当时麦克风权限框弹着，第一次 buildGraph() 卡在 getUserMedia 上不返回；
+ * 用户 1.2 秒后又按一次键 → 第二次进来直接 `await teardown()`，把第一份正在建的
+ * stream/ctx 清成 null 并 stop 掉 track，两条执行流互相踩，最后留下一个
+ * 「ctx.state === 'running'、worklet 非空、但源流已经死了」的僵尸图——
+ * 下面那行守卫判它健康就一直复用，于是**之后每次录音都零块**。
+ * 所以先等在飞的那次建完再判守卫，而不是判完再建。
+ */
+let building = null;
 async function ensureGraph() {
+  if (building) {
+    // 别管上一次成没成：成了下面守卫会放行，没成 graphDead/ctx 的状态会让它重建
+    try { await building; } catch { /* 上一次的失败由它自己的调用方 report 过了 */ }
+  }
   if (!graphDead && ctx && ctx.state === 'running' && worklet) return;
-  await teardown();
-  graphDead = false;
-  await buildGraph();
+  building = (async () => {
+    await teardown();
+    graphDead = false;
+    await buildGraph();
+  })();
+  try {
+    await building;
+  } finally {
+    building = null;
+  }
 }
 
 async function teardown() {
@@ -174,8 +205,11 @@ async function startCapture({ sessionId }) {
     } catch (e) {
       report('worklet', e); // main 侧 3 秒超时后会降级按 WAV 上传
     }
-    // 自愈：一块都没收到说明这套图是死的（设备被占、渲染器挂了）。
+    // 自愈的**快路径**：一块都没收到说明这套图是死的（设备被占、渲染器挂了）。
     // 不标脏的话下一次录音还会复用它，于是每次都录不到东西（实测如此）。
+    // 但这条不是唯一兜底 —— 权威判定在 main 侧 collect()：MediaRecorder 压根没起来时
+    // （权限框挂住 ensureGraph）onstop 根本不发生，这里一次都不会跑到，
+    // 而 main 每次会话都拿得到 chunkCount，由它经 capture:rebuild 命令重建（见 onRebuild）。
     if (got === 0) markDead('audio-context', '本次录音没有收到任何 PCM 块，已标记音频图重建');
   };
   recorder.start();
@@ -192,6 +226,16 @@ function stopCapture() {
 
 api.onStart((p) => { startCapture(p || {}); });
 api.onStop(() => { stopCapture(); });
+// main 判定零块后的强制重建。**无条件**销毁，不看 ctx.state —— 实测它会说谎
+// （自报 running/16000Hz、track enabled=true，却一块 PCM 都不送）。
+// 只置脏 + teardown，不在这里重建：下次 startCapture 的 ensureGraph 会建，
+// 那时才知道该用哪个设备，也避免和在飞的那次建图抢（有 in-flight 锁，但没必要）。
+if (api.onRebuild) {
+  api.onRebuild(() => {
+    graphDead = true;
+    teardown().catch(() => { /* 本来就是要扔掉它 */ });
+  });
+}
 
 // ───────────────────── 导入音频的解码（§24.2，评审 H3） ─────────────────────
 //
