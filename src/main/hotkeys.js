@@ -10,6 +10,12 @@
 //    右 Option（评审 N4）。
 // ③ validate() 是纯函数，副作用（真正去 register）单独放 tryRegister()，
 //    否则裸 Node 的单测没法测（评审 M8）。
+// ④ createController 返回的 mode / reason / accelerators 必须用
+//    Object.defineProperties 定义，**不能**塞进 Object.assign 的对象字面量里：
+//    Object.assign 对 source 做 [[Get]]，getter 会被当场求值成普通数据属性，
+//    于是 hotkeys.mode 被永久冻在初值 'combo'。后果是托盘「热键模式」那行和
+//    设置页顶部永远显示「组合键」，而同一个菜单里 describe()（普通方法，读闭包活变量）
+//    却显示「右 Option 单击」——一个菜单两种事实。test/hotkeys.test.js 有回归断言。
 //
 // 加载期不碰 electron，也不碰 uiohook-napi：两者都在函数体里 require。
 const fs = require('fs');
@@ -354,6 +360,12 @@ function createController({ platform = process.platform, saveMode, notify } = {}
     stopCombo();
   }
 
+  // 三个活访问器单独走 defineProperties（见文件头踩坑 ④），放进下面的 Object.assign 会变成快照。
+  Object.defineProperties(bus, {
+    mode: { enumerable: true, get() { return mode; } },
+    reason: { enumerable: true, get() { return reason; } },
+    accelerators: { enumerable: true, get() { return { ...registered }; } },
+  });
   return Object.assign(bus, {
     start,
     stop,
@@ -362,9 +374,6 @@ function createController({ platform = process.platform, saveMode, notify } = {}
     tryRegister,
     state,
     label,
-    get mode() { return mode; },
-    get reason() { return reason; },
-    get accelerators() { return { ...registered }; },
     /** 托盘与设置页的两行热键文案，按平台/模式取。 */
     describe() {
       if (mode === 'single') return { short: `${label.short} 单击`, long: `${label.long} 单击` };
