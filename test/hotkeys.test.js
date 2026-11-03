@@ -127,3 +127,14 @@ test('SUPPRESS_MS 覆盖 osascript 的回写延迟量级', () => {
   assert.ok(hk.SUPPRESS_MS >= 300, '太短会被自己发的 Cmd+V 误吃');
   assert.ok(hk.SUPPRESS_MS <= 1000, '太长会吃掉用户的下一次按键');
 });
+test('mode / reason / accelerators 必须是活 getter，不能是快照（托盘文案永停「组合键」的那个 bug）', () => {
+  // createController 只建 EventEmitter、不碰 electron，裸 Node 可直接构造。
+  const c = hk.createController({ platform: 'darwin' });
+  for (const k of ['mode', 'reason', 'accelerators']) {
+    const d = Object.getOwnPropertyDescriptor(c, k);
+    assert.strictEqual(typeof d.get, 'function',
+      `${k} 必须用 Object.defineProperties 定义：Object.assign 会把 getter 求值成快照，托盘「热键模式」会永久停在 combo`);
+    assert.strictEqual(d.value, undefined,
+      `${k} 成了数据属性，说明 getter 已被 Object.assign 求值成快照`);
+  }
+});

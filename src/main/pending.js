@@ -391,9 +391,11 @@ function scanTmp() {
     }
     let info = null;
     let lv = { peak: 0, rms: 0 };
+    let pcm = null;
     try {
       info = wav.parse(p);
-      lv = wav.levels(wav.readPcm(p));
+      pcm = wav.readPcm(p);
+      lv = wav.levels(pcm);
     } catch (e) {
       logger.warn(MOD, `tmp 残留不可解析，直接删：${n} ${e && e.message}`);
       cleanupTmp(sessionId, 'crash-residue');
@@ -401,7 +403,9 @@ function scanTmp() {
       continue;
     }
     const durationSec = info.frames / (info.sampleRate || 16000);
-    if (durationSec < MIN_DURATION_SEC || lv.peak < wav.SILENCE_PEAK) {
+    // 判静音走 wav.isSilent（peak + 短窗 RMS），和 pipeline 用同一套判据：
+    // 只看 peak 会把底噪留下来、又把轻声说话删掉，两头都错。PCM 上面读过了，复用。
+    if (durationSec < MIN_DURATION_SEC || wav.isSilent(pcm)) {
       cleanupTmp(sessionId, 'crash-residue', { durationSec, ...lv });
       dropped += 1;
       continue;
@@ -470,6 +474,8 @@ async function retryOldest({ isRecording, transcribeOne, anyCooling, now = Date.
       // 拿占位值判静音就会删掉那段话的唯一副本（评审 H2）；pipeline.js 对同一件事
       // 是防住了的（`meta.peak < 1 && !pcm`），这里照它补上。
       // ext !== 'wav' 一律视为没量过，兼容已经落盘的老 sidecar（那些里面是 peak:0）。
+      // 这里故意**不**换成 wav.isSilent：补转只有 sidecar 里的 peak、没有 PCM，
+      // 算不出窗 RMS。阈值从 500 降到 200 后这条路更不容易删录音，方向是安全的。
       const measured = (item.ext || 'wav') === 'wav' && Number.isFinite(meta.peak);
       if (measured && meta.peak < wav.SILENCE_PEAK) {
         clear(item.path);
